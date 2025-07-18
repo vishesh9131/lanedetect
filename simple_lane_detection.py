@@ -413,4 +413,5 @@ def main():
         rospy.logerr(f"Lane Detection Node error: {e}")
 
 if __name__ == '__main__':
+    # github submission
     main() 
