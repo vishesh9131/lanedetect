@@ -373,7 +373,7 @@ def process_video_improved(video_path, output_path=None):
 
 def main():
     """Main function"""
-    video_path = "road.mp4"
+    video_path = "road4.m4v"
     
     # Check if video exists
     if not os.path.exists(video_path):
@@ -381,7 +381,7 @@ def main():
         return
     
     # Process video
-    output_path = "improved_lane_detection_output.mp4"
+    output_path = "4improved_lane_detection_output.mp4"
     process_video_improved(video_path, output_path)
     
     print(f"Improved lane detection completed! Output saved to: {output_path}")

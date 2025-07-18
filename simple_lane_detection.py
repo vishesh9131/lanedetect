@@ -257,7 +257,7 @@ def process_video(video_path, output_path=None):
 
 def main():
     """Main function"""
-    video_path = "road2.mp4"
+    video_path = "road.mp4"
     
     # Check if video exists
     if not os.path.exists(video_path):

@@ -363,7 +363,7 @@ def process_video_advanced(video_path, model_path=None, output_path=None):
 
 def main():
     """Main function"""
-    video_path = "road2.mp4"
+    video_path = "road4.m4v"
     model_path = "enet_baseline_tusimple_model.pt"
     
     # Check if video exists
@@ -372,7 +372,7 @@ def main():
         return
     
     # Process video
-    output_path = "advanced_lane_detection_output.mp4"
+    output_path = "4advanced_lane_detection_output.mp4"
     process_video_advanced(video_path, model_path, output_path)
     
     print(f"Advanced lane detection completed! Output saved to: {output_path}")

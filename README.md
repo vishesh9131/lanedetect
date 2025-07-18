@@ -1,18 +1,35 @@
 # Lane Detection for Autonomous Driving
 
-This project implements real-time lane detection using the ENet (Efficient Neural Network) model trained on the TuSimple dataset. The system can detect lane boundaries in video footage and provide steering decisions for autonomous vehicle navigation.
+This repository contains multiple implementations of lane detection systems for autonomous vehicle driving, specifically optimized for rough road conditions.
 
-## Features
+## Implementations
 
-- **Real-time Lane Detection**: Uses ENet model with 95.61% accuracy on TuSimple dataset
-- **Autonomous Driving Decisions**: Calculates steering angles and provides driving commands
-- **Visual Feedback**: Displays detected lanes, steering wheel, and driving decisions
-- **Video Processing**: Processes video files and outputs annotated results
-- **GPU Support**: Automatically uses CUDA if available for faster processing
+### 1. Ultimate Lane Detection (`lane_detection_ultimate.py`)
+**Recommended for rough road conditions**
 
-## Requirements
+- Advanced preprocessing with multiple color spaces (HSV, LAB)
+- Sophisticated ROI masking for rough roads
+- Optimized Hough Transform parameters
+- Multi-frame lane tracking with smoothing
+- Robust polynomial fitting
+- Real-time steering angle calculation
+- Enhanced visualization with confidence indicators
 
-Install the required dependencies:
+### 2. Advanced Lane Detection (`advanced_lane_detection.py`)
+Hybrid approach with neural network fallback
+
+- Attempts to use ENet model
+- Falls back to traditional CV if model fails
+- Basic lane detection with steering calculation
+
+### 3. Simple Lane Detection (`simple_lane_detection.py`)
+Traditional computer vision approach
+
+- Canny edge detection
+- Hough Transform line detection
+- Basic steering angle calculation
+
+## Installation
 
 ```bash
 pip install -r requirements.txt
@@ -20,136 +37,79 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Basic Usage
-
-1. Place your video file (e.g., `road.mp4`) in the project directory
-2. Run the lane detection script:
-
+### Ultimate Lane Detection (Recommended)
 ```bash
-python lane_detection.py
+python lane_detection_ultimate.py
 ```
 
-The script will:
-- Download the ENet model automatically (if not already present)
-- Process the video frame by frame
-- Display real-time results
-- Save the output video as `lane_detection_output.mp4`
+### Advanced Lane Detection
+```bash
+python advanced_lane_detection.py
+```
 
-### Model Information
+### Simple Lane Detection
+```bash
+python simple_lane_detection.py
+```
 
-The system uses the ENet model with the following specifications:
-- **Model**: ENet (Efficient Neural Network)
-- **Dataset**: TuSimple Lane Detection Challenge
-- **Accuracy**: 95.61%
-- **Input Size**: 512x288 pixels
-- **Output**: Binary lane segmentation mask
+## Features
 
-## How It Works
+### Ultimate Lane Detection Features:
+- **Multi-color space analysis**: Uses HSV and LAB color spaces for better lane detection
+- **Adaptive ROI**: Sophisticated region of interest for rough road conditions
+- **Line filtering**: Intelligent filtering based on slope and position
+- **Polynomial fitting**: Robust curve fitting for smooth lane representation
+- **Frame tracking**: Multi-frame smoothing to reduce jitter
+- **Steering calculation**: Real-time steering angle computation
+- **Enhanced visualization**: Comprehensive UI with confidence indicators
 
-### 1. Model Architecture
-The ENet model consists of:
-- **Encoder**: Downsampling and feature extraction
-- **Decoder**: Upsampling and segmentation
-- **Bottleneck blocks**: Efficient residual connections
+### Key Improvements for Rough Roads:
+- Lower Hough Transform thresholds for better detection
+- Shorter minimum line lengths
+- Larger gap tolerance
+- Multiple color masks (white and yellow lanes)
+- Morphological operations for noise reduction
+- Adaptive region of interest
 
-### 2. Processing Pipeline
-1. **Preprocessing**: Resize and normalize input frames
-2. **Inference**: Run ENet model to get lane segmentation
-3. **Postprocessing**: Convert model output to binary mask
-4. **Lane Detection**: Extract lane contours using OpenCV
-5. **Steering Calculation**: Compute steering angle based on lane positions
-6. **Visualization**: Draw results and driving decisions
+## Output
 
-### 3. Steering Logic
-The system calculates steering decisions based on:
-- **Lane Center Detection**: Finds the center of detected lanes
-- **Deviation Calculation**: Measures deviation from image center
-- **Steering Angle**: Normalized angle between -1 (left) and 1 (right)
-- **Driving Commands**: 
-  - `GO STRAIGHT`: When steering angle < 0.1
-  - `TURN LEFT`: When steering angle < -0.1
-  - `TURN RIGHT`: When steering angle > 0.1
+Each implementation generates:
+- Processed video with lane detection overlay
+- Real-time steering angle calculation
+- Driving decision indicators (GO STRAIGHT, TURN LEFT, TURN RIGHT)
+- Confidence levels
+- Frame counters
 
-## Output Visualization
+## File Structure
 
-The processed video includes:
-- **Green Contours**: Detected lane boundaries
-- **Steering Wheel**: Visual indicator showing steering direction
-- **Text Overlay**: 
-  - Steering angle value
-  - Driving decision (GO STRAIGHT/TURN LEFT/TURN RIGHT)
+```
+lanedetect/
+├── lane_detection_ultimate.py      # Ultimate implementation (recommended)
+├── advanced_lane_detection.py      # Hybrid neural network approach
+├── simple_lane_detection.py        # Traditional CV approach
+├── requirements.txt                # Dependencies
+├── README.md                       # This file
+├── road.mp4                        # Input video
+└── *_output.mp4                    # Output videos
+```
 
 ## Performance
 
-- **Processing Speed**: ~10-15 FPS on CPU, ~25-30 FPS on GPU
-- **Memory Usage**: ~2GB RAM for video processing
-- **Model Size**: ~2.5MB (ENet model)
+- **Ultimate Lane Detection**: Best performance on rough roads, smooth output
+- **Advanced Lane Detection**: Good performance with neural network fallback
+- **Simple Lane Detection**: Basic performance, may be unstable on rough roads
 
-## Customization
+## Requirements
 
-### Adjusting Parameters
+- Python 3.7+
+- OpenCV 4.8+
+- NumPy 1.24+
+- PyTorch 2.0+ (for neural network approaches)
+- Video file: `road.mp4`
 
-You can modify the following parameters in `lane_detection.py`:
+## Notes
 
-```python
-# Lane detection sensitivity
-lane_prob_threshold = 0.5  # Threshold for lane segmentation
-min_contour_area = 100     # Minimum area for valid lane contours
-
-# Steering sensitivity
-steering_threshold = 0.1   # Threshold for straight driving decision
-```
-
-### Using Different Videos
-
-To process a different video file:
-
-```python
-# Change the video path in main()
-video_path = "your_video.mp4"
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Model Download Fails**: 
-   - Check internet connection
-   - The model will be downloaded automatically on first run
-
-2. **Video Not Found**:
-   - Ensure the video file exists in the project directory
-   - Check file permissions
-
-3. **CUDA Out of Memory**:
-   - The system automatically falls back to CPU if GPU memory is insufficient
-
-4. **Poor Lane Detection**:
-   - Ensure good lighting conditions in the video
-   - Check if lanes are clearly visible
-   - Adjust threshold parameters if needed
-
-## Technical Details
-
-### Model Architecture
-- **Input**: RGB image (512x288)
-- **Output**: 2-channel segmentation (background, lane)
-- **Activation**: ReLU, Softmax
-- **Optimization**: Adam optimizer, Cross-entropy loss
-
-### Dependencies
-- PyTorch: Deep learning framework
-- OpenCV: Computer vision operations
-- NumPy: Numerical computations
-- Matplotlib: Visualization (optional)
-- PIL: Image processing
-
-## License
-
-This project is for educational and research purposes. The ENet model is trained on the TuSimple dataset.
-
-## Acknowledgments
-
-- ENet paper: "ENet: A Deep Neural Network Architecture for Real-Time Semantic Segmentation"
-- TuSimple Lane Detection Challenge dataset
-- PyTorch and OpenCV communities 
+- The ENet model approach may not work due to architecture mismatches
+- Ultimate lane detection is specifically optimized for rough road conditions
+- All implementations include real-time visualization
+- Press 'q' to quit during video processing 
