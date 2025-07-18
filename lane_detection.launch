@@ -1,0 +1,31 @@
+<launch>
+    <!-- Lane Detection Node -->
+    <node name="lane_detection_node" pkg="your_package_name" type="lane_detection_node.py" output="screen">
+        <!-- Camera topic to subscribe to -->
+        <param name="camera_topic" value="/usb_cam/image_raw" />
+        
+        <!-- Command velocity topic to publish to -->
+        <param name="cmd_vel_topic" value="/cmd_vel" />
+        
+        <!-- Control parameters -->
+        <param name="max_linear_velocity" value="0.5" />
+        <param name="max_angular_velocity" value="1.0" />
+        <param name="steering_sensitivity" value="1.0" />
+    </node>
+    
+    <!-- Optional: Uncomment if you want to use compressed images -->
+    <!--
+    <node name="lane_detection_node" pkg="your_package_name" type="lane_detection_node.py" output="screen">
+        <param name="camera_topic" value="/usb_cam/image_raw/compressed" />
+        <param name="cmd_vel_topic" value="/cmd_vel" />
+        <param name="max_linear_velocity" value="0.5" />
+        <param name="max_angular_velocity" value="1.0" />
+        <param name="steering_sensitivity" value="1.0" />
+    </node>
+    -->
+    
+    <!-- Optional: Uncomment if you want to visualize the cmd_vel messages -->
+    <!--
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find your_package_name)/rviz/lane_detection.rviz" />
+    -->
+</launch> 
