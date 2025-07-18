@@ -273,34 +273,41 @@ class LaneDetectionNode:
     def publish_debug_image(self, frame, edges, roi_edges, left_lines, right_lines, steering_angle):
         """Publish debug image with multiple visualization layers"""
         try:
-            # Create debug image with multiple panels
+            # Resize frame to make debug image smaller
             height, width = frame.shape[:2]
-            debug_image = np.zeros((height * 2, width * 2, 3), dtype=np.uint8)
+            small_height, small_width = height // 2, width // 2
             
-            # Panel 1: Original frame
-            debug_image[0:height, 0:width] = frame
+            # Create debug image with smaller panels
+            debug_image = np.zeros((height, width, 3), dtype=np.uint8)
             
-            # Panel 2: Edge detection
+            # Resize original frame for top left panel
+            frame_small = cv2.resize(frame, (small_width, small_height))
+            debug_image[0:small_height, 0:small_width] = frame_small
+            
+            # Resize edge detection for top right panel
             edges_color = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-            debug_image[0:height, width:width*2] = edges_color
+            edges_small = cv2.resize(edges_color, (small_width, small_height))
+            debug_image[0:small_height, small_width:width] = edges_small
             
-            # Panel 3: ROI edges
+            # Resize ROI edges for bottom left panel
             roi_edges_color = cv2.cvtColor(roi_edges, cv2.COLOR_GRAY2BGR)
-            debug_image[height:height*2, 0:width] = roi_edges_color
+            roi_edges_small = cv2.resize(roi_edges_color, (small_width, small_height))
+            debug_image[small_height:height, 0:small_width] = roi_edges_small
             
-            # Panel 4: Final result with lane detection
+            # Create final result for bottom right panel
             result_frame = self.draw_lanes(frame, 
                                          self.fit_polynomial(left_lines, height) if left_lines else None,
                                          self.fit_polynomial(right_lines, height) if right_lines else None, 
                                          height)
             result_frame = self.draw_steering_info(result_frame, steering_angle)
-            debug_image[height:height*2, width:width*2] = result_frame
+            result_small = cv2.resize(result_frame, (small_width, small_height))
+            debug_image[small_height:height, small_width:width] = result_small
             
-            # Add panel labels
-            cv2.putText(debug_image, "Original", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(debug_image, "Edge Detection", (width + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(debug_image, "ROI Edges", (10, height + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(debug_image, "Lane Detection", (width + 10, height + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            # Add panel labels (smaller text)
+            cv2.putText(debug_image, "Original", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(debug_image, "Edges", (small_width + 10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(debug_image, "ROI", (10, small_height + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(debug_image, "Result", (small_width + 10, small_height + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
             # Convert to ROS Image and publish
             ros_image = self.bridge.cv2_to_imgmsg(debug_image, "bgr8")
@@ -395,11 +402,6 @@ class LaneDetectionNode:
                     rospy.logerr(f"Error processing frame: {e}")
             
             rate.sleep()
-    
-    def publish_debug_image(self, frame, steering_angle):
-        """Publish debug image with lane detection overlay"""
-        # This is optional - you can implement this if you want to visualize the detection
-        pass
 
 def main():
     try:
