@@ -1,274 +1,416 @@
+#!/usr/bin/env python3
+
+import rospy
 import cv2
 import numpy as np
 import math
-import os
+from sensor_msgs.msg import Image, CompressedImage
+from geometry_msgs.msg import Twist
+from cv_bridge import CvBridge
+import threading
+import time
 
-def preprocess_frame(frame):
-    """Preprocess frame for lane detection"""
-    # Convert to grayscale
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    # Apply Gaussian blur
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # Apply Canny edge detection
-    edges = cv2.Canny(blurred, 50, 150)
-    
-    return edges
-
-def region_of_interest(edges, height, width):
-    """Define region of interest for lane detection"""
-    # Define polygon vertices for ROI
-    # Focus on the bottom half of the image
-    roi_vertices = np.array([
-        [(0, height), (width//2 - 50, height//2), (width//2 + 50, height//2), (width, height)]
-    ], dtype=np.int32)
-    
-    # Create mask
-    mask = np.zeros_like(edges)
-    cv2.fillPoly(mask, roi_vertices, 255)
-    
-    # Apply mask
-    masked_edges = cv2.bitwise_and(edges, mask)
-    
-    return masked_edges
-
-def detect_lane_lines(edges):
-    """Detect lane lines using Hough Transform"""
-    # Apply Hough Transform
-    lines = cv2.HoughLinesP(
-        edges,
-        rho=1,
-        theta=np.pi/180,
-        threshold=50,
-        minLineLength=100,
-        maxLineGap=50
-    )
-    
-    return lines
-
-def separate_lines(lines, width):
-    """Separate lines into left and right lanes"""
-    left_lines = []
-    right_lines = []
-    
-    if lines is not None:
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
+class LaneDetectionNode:
+    def __init__(self):
+        rospy.init_node('lane_detection_node', anonymous=True)
+        
+        # Initialize CV bridge
+        self.bridge = CvBridge()
+        
+        # Parameters
+        self.camera_topic = rospy.get_param('~camera_topic', '/usb_cam/image_raw')
+        self.cmd_vel_topic = rospy.get_param('~cmd_vel_topic', '/cmd_vel')
+        self.processed_image_topic = rospy.get_param('~processed_image_topic', '/lane_detection/processed_image')
+        self.debug_image_topic = rospy.get_param('~debug_image_topic', '/lane_detection/debug_image')
+        self.max_linear_velocity = rospy.get_param('~max_linear_velocity', 0.5)
+        self.max_angular_velocity = rospy.get_param('~max_angular_velocity', 1.0)
+        self.steering_sensitivity = rospy.get_param('~steering_sensitivity', 1.0)
+        
+        # Publishers and Subscribers
+        self.cmd_vel_pub = rospy.Publisher(self.cmd_vel_topic, Twist, queue_size=1)
+        self.processed_image_pub = rospy.Publisher(self.processed_image_topic, Image, queue_size=1)
+        self.debug_image_pub = rospy.Publisher(self.debug_image_topic, Image, queue_size=1)
+        self.image_sub = rospy.Subscriber(self.camera_topic, Image, self.image_callback)
+        
+        # Alternative compressed image subscriber (uncomment if needed)
+        # self.compressed_image_sub = rospy.Subscriber(
+        #     self.camera_topic + '/compressed', CompressedImage, self.compressed_image_callback
+        # )
+        
+        # State variables
+        self.latest_frame = None
+        self.frame_lock = threading.Lock()
+        self.processing = False
+        
+        # Control variables
+        self.last_steering_angle = 0.0
+        self.steering_filter_alpha = 0.7  # Low-pass filter for smooth steering
+        
+        rospy.loginfo(f"Lane Detection Node initialized")
+        rospy.loginfo(f"Subscribing to: {self.camera_topic}")
+        rospy.loginfo(f"Publishing to: {self.cmd_vel_topic}")
+        rospy.loginfo(f"Publishing processed images to: {self.processed_image_topic}")
+        rospy.loginfo(f"Publishing debug images to: {self.debug_image_topic}")
+        
+    def image_callback(self, msg):
+        """Callback for Image messages"""
+        try:
+            # Convert ROS Image to OpenCV format
+            cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
             
-            # Calculate slope
-            if x2 - x1 != 0:
-                slope = (y2 - y1) / (x2 - x1)
+            with self.frame_lock:
+                self.latest_frame = cv_image.copy()
                 
-                # Filter lines based on slope
-                if abs(slope) > 0.3:  # Filter out horizontal lines
-                    if slope < 0:  # Left lane
-                        left_lines.append(line[0])
-                    else:  # Right lane
-                        right_lines.append(line[0])
+        except Exception as e:
+            rospy.logerr(f"Error converting image: {e}")
     
-    return left_lines, right_lines
-
-def fit_polynomial(lines, height):
-    """Fit polynomial to lane lines"""
-    if not lines:
+    def compressed_image_callback(self, msg):
+        """Callback for CompressedImage messages"""
+        try:
+            # Convert compressed image to OpenCV format
+            np_arr = np.frombuffer(msg.data, np.uint8)
+            cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            
+            with self.frame_lock:
+                self.latest_frame = cv_image.copy()
+                
+        except Exception as e:
+            rospy.logerr(f"Error converting compressed image: {e}")
+    
+    def preprocess_frame(self, frame):
+        """Preprocess frame for lane detection"""
+        # Convert to grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Apply Gaussian blur
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        
+        # Apply Canny edge detection
+        edges = cv2.Canny(blurred, 50, 150)
+        
+        return edges
+    
+    def region_of_interest(self, edges, height, width):
+        """Define region of interest for lane detection"""
+        # Define polygon vertices for ROI
+        # Focus on the bottom half of the image
+        roi_vertices = np.array([
+            [(0, height), (width//2 - 50, height//2), (width//2 + 50, height//2), (width, height)]
+        ], dtype=np.int32)
+        
+        # Create mask
+        mask = np.zeros_like(edges)
+        cv2.fillPoly(mask, roi_vertices, 255)
+        
+        # Apply mask
+        masked_edges = cv2.bitwise_and(edges, mask)
+        
+        return masked_edges
+    
+    def detect_lane_lines(self, edges):
+        """Detect lane lines using Hough Transform"""
+        # Apply Hough Transform
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi/180,
+            threshold=50,
+            minLineLength=100,
+            maxLineGap=50
+        )
+        
+        return lines
+    
+    def separate_lines(self, lines, width):
+        """Separate lines into left and right lanes"""
+        left_lines = []
+        right_lines = []
+        
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                
+                # Calculate slope
+                if x2 - x1 != 0:
+                    slope = (y2 - y1) / (x2 - x1)
+                    
+                    # Filter lines based on slope
+                    if abs(slope) > 0.3:  # Filter out horizontal lines
+                        if slope < 0:  # Left lane
+                            left_lines.append(line[0])
+                        else:  # Right lane
+                            right_lines.append(line[0])
+        
+        return left_lines, right_lines
+    
+    def fit_polynomial(self, lines, height):
+        """Fit polynomial to lane lines"""
+        if not lines:
+            return None
+        
+        # Extract x and y coordinates
+        x_coords = []
+        y_coords = []
+        
+        for line in lines:
+            x1, y1, x2, y2 = line
+            x_coords.extend([x1, x2])
+            y_coords.extend([y1, y2])
+        
+        # Fit polynomial
+        if len(x_coords) > 1:
+            coeffs = np.polyfit(y_coords, x_coords, 1)
+            return coeffs
+        
         return None
     
-    # Extract x and y coordinates
-    x_coords = []
-    y_coords = []
-    
-    for line in lines:
-        x1, y1, x2, y2 = line
-        x_coords.extend([x1, x2])
-        y_coords.extend([y1, y2])
-    
-    # Fit polynomial
-    if len(x_coords) > 1:
-        coeffs = np.polyfit(y_coords, x_coords, 1)
-        return coeffs
-    
-    return None
-
-def calculate_steering_angle(left_coeffs, right_coeffs, height, width):
-    """Calculate steering angle based on lane positions"""
-    center_x = width // 2
-    
-    # Calculate lane centers at bottom of image
-    left_x = None
-    right_x = None
-    
-    if left_coeffs is not None:
-        left_x = left_coeffs[0] * height + left_coeffs[1]
-    
-    if right_coeffs is not None:
-        right_x = right_coeffs[0] * height + right_coeffs[1]
-    
-    # Calculate lane center
-    if left_x is not None and right_x is not None:
-        # Both lanes detected
-        lane_center = (left_x + right_x) / 2
-    elif left_x is not None:
-        # Only left lane detected
-        lane_center = left_x + 200  # Assume lane width
-    elif right_x is not None:
-        # Only right lane detected
-        lane_center = right_x - 200  # Assume lane width
-    else:
-        # No lanes detected
-        return 0.0
-    
-    # Calculate deviation from center
-    deviation = lane_center - center_x
-    
-    # Convert to steering angle (normalized to [-1, 1])
-    max_deviation = width // 2
-    steering_angle = np.clip(deviation / max_deviation, -1.0, 1.0)
-    
-    return steering_angle
-
-def draw_lanes(frame, left_coeffs, right_coeffs, height):
-    """Draw detected lanes on frame"""
-    result = frame.copy()
-    
-    # Generate points for polynomial curves
-    y_points = np.linspace(height//2, height, 50)
-    
-    # Draw left lane
-    if left_coeffs is not None:
-        left_x_points = left_coeffs[0] * y_points + left_coeffs[1]
-        left_points = np.array([np.column_stack((left_x_points, y_points))], dtype=np.int32)
-        cv2.polylines(result, left_points, False, (0, 255, 0), 3)
-    
-    # Draw right lane
-    if right_coeffs is not None:
-        right_x_points = right_coeffs[0] * y_points + right_coeffs[1]
-        right_points = np.array([np.column_stack((right_x_points, y_points))], dtype=np.int32)
-        cv2.polylines(result, right_points, False, (0, 255, 0), 3)
-    
-    return result
-
-def draw_steering_info(frame, steering_angle):
-    """Draw steering information on frame"""
-    height, width = frame.shape[:2]
-    
-    # Draw steering wheel
-    center_x = width // 2
-    center_y = height - 50
-    
-    cv2.circle(frame, (center_x, center_y), 30, (255, 255, 255), 2)
-    
-    # Draw steering direction
-    angle_rad = steering_angle * math.pi / 4  # Scale angle for visualization
-    end_x = center_x + int(25 * math.sin(angle_rad))
-    end_y = center_y - int(25 * math.cos(angle_rad))
-    cv2.line(frame, (center_x, center_y), (end_x, end_y), (0, 0, 255), 3)
-    
-    # Add text
-    cv2.putText(frame, f"Steering: {steering_angle:.2f}", (10, 30), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    
-    # Add driving decision
-    if abs(steering_angle) < 0.1:
-        decision = "GO STRAIGHT"
-        color = (0, 255, 0)
-    elif steering_angle > 0:
-        decision = "TURN RIGHT"
-        color = (0, 0, 255)
-    else:
-        decision = "TURN LEFT"
-        color = (255, 0, 0)
-    
-    cv2.putText(frame, decision, (10, 60), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-    
-    return frame
-
-def process_video(video_path, output_path=None):
-    """Process video for lane detection"""
-    # Open video
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"Error: Could not open video {video_path}")
-        return
-    
-    # Get video properties
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
-    # Setup output video
-    if output_path:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    
-    frame_count = 0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    print("Processing video...")
-    
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    def calculate_steering_angle(self, left_coeffs, right_coeffs, height, width):
+        """Calculate steering angle based on lane positions"""
+        center_x = width // 2
         
-        frame_count += 1
-        print(f"\rProcessing frame {frame_count}/{total_frames}", end="")
+        # Calculate lane centers at bottom of image
+        left_x = None
+        right_x = None
+        
+        if left_coeffs is not None:
+            left_x = left_coeffs[0] * height + left_coeffs[1]
+        
+        if right_coeffs is not None:
+            right_x = right_coeffs[0] * height + right_coeffs[1]
+        
+        # Calculate lane center
+        if left_x is not None and right_x is not None:
+            # Both lanes detected
+            lane_center = (left_x + right_x) / 2
+        elif left_x is not None:
+            # Only left lane detected
+            lane_center = left_x + 200  # Assume lane width
+        elif right_x is not None:
+            # Only right lane detected
+            lane_center = right_x - 200  # Assume lane width
+        else:
+            # No lanes detected
+            return 0.0
+        
+        # Calculate deviation from center
+        deviation = lane_center - center_x
+        
+        # Convert to steering angle (normalized to [-1, 1])
+        max_deviation = width // 2
+        steering_angle = np.clip(deviation / max_deviation, -1.0, 1.0)
+        
+        return steering_angle
+    
+    def draw_lanes(self, frame, left_coeffs, right_coeffs, height):
+        """Draw detected lanes on frame"""
+        result = frame.copy()
+        
+        # Generate points for polynomial curves
+        y_points = np.linspace(height//2, height, 50)
+        
+        # Draw left lane
+        if left_coeffs is not None:
+            left_x_points = left_coeffs[0] * y_points + left_coeffs[1]
+            left_points = np.array([np.column_stack((left_x_points, y_points))], dtype=np.int32)
+            cv2.polylines(result, left_points, False, (0, 255, 0), 3)
+        
+        # Draw right lane
+        if right_coeffs is not None:
+            right_x_points = right_coeffs[0] * y_points + right_coeffs[1]
+            right_points = np.array([np.column_stack((right_x_points, y_points))], dtype=np.int32)
+            cv2.polylines(result, right_points, False, (0, 255, 0), 3)
+        
+        return result
+    
+    def draw_steering_info(self, frame, steering_angle):
+        """Draw steering information on frame"""
+        height, width = frame.shape[:2]
+        
+        # Draw steering wheel
+        center_x = width // 2
+        center_y = height - 50
+        
+        cv2.circle(frame, (center_x, center_y), 30, (255, 255, 255), 2)
+        
+        # Draw steering direction
+        angle_rad = steering_angle * math.pi / 4  # Scale angle for visualization
+        end_x = center_x + int(25 * math.sin(angle_rad))
+        end_y = center_y - int(25 * math.cos(angle_rad))
+        cv2.line(frame, (center_x, center_y), (end_x, end_y), (0, 0, 255), 3)
+        
+        # Add text
+        cv2.putText(frame, f"Steering: {steering_angle:.2f}", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Add driving decision
+        if abs(steering_angle) < 0.1:
+            decision = "GO STRAIGHT"
+            color = (0, 255, 0)
+        elif steering_angle > 0:
+            decision = "TURN RIGHT"
+            color = (0, 0, 255)
+        else:
+            decision = "TURN LEFT"
+            color = (255, 0, 0)
+        
+        cv2.putText(frame, decision, (10, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        
+        return frame
+    
+    def publish_processed_image(self, processed_frame):
+        """Publish processed image as ROS Image message"""
+        try:
+            # Convert OpenCV image to ROS Image message
+            ros_image = self.bridge.cv2_to_imgmsg(processed_frame, "bgr8")
+            
+            # Publish the processed image
+            self.processed_image_pub.publish(ros_image)
+            
+        except Exception as e:
+            rospy.logerr(f"Error publishing processed image: {e}")
+    
+    def publish_debug_image(self, frame, edges, roi_edges, left_lines, right_lines, steering_angle):
+        """Publish debug image with multiple visualization layers"""
+        try:
+            # Resize frame to make debug image smaller
+            height, width = frame.shape[:2]
+            small_height, small_width = height // 2, width // 2
+            
+            # Create debug image with smaller panels
+            debug_image = np.zeros((height, width, 3), dtype=np.uint8)
+            
+            # Resize original frame for top left panel
+            frame_small = cv2.resize(frame, (small_width, small_height))
+            debug_image[0:small_height, 0:small_width] = frame_small
+            
+            # Resize edge detection for top right panel
+            edges_color = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+            edges_small = cv2.resize(edges_color, (small_width, small_height))
+            debug_image[0:small_height, small_width:width] = edges_small
+            
+            # Resize ROI edges for bottom left panel
+            roi_edges_color = cv2.cvtColor(roi_edges, cv2.COLOR_GRAY2BGR)
+            roi_edges_small = cv2.resize(roi_edges_color, (small_width, small_height))
+            debug_image[small_height:height, 0:small_width] = roi_edges_small
+            
+            # Create final result for bottom right panel
+            result_frame = self.draw_lanes(frame, 
+                                         self.fit_polynomial(left_lines, height) if left_lines else None,
+                                         self.fit_polynomial(right_lines, height) if right_lines else None, 
+                                         height)
+            result_frame = self.draw_steering_info(result_frame, steering_angle)
+            result_small = cv2.resize(result_frame, (small_width, small_height))
+            debug_image[small_height:height, small_width:width] = result_small
+            
+            # Add panel labels (smaller text)
+            cv2.putText(debug_image, "Original", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(debug_image, "Edges", (small_width + 10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(debug_image, "ROI", (10, small_height + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(debug_image, "Result", (small_width + 10, small_height + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Convert to ROS Image and publish
+            ros_image = self.bridge.cv2_to_imgmsg(debug_image, "bgr8")
+            self.debug_image_pub.publish(ros_image)
+            
+        except Exception as e:
+            rospy.logerr(f"Error publishing debug image: {e}")
+    
+    def publish_cmd_vel(self, steering_angle):
+        """Publish steering command as Twist message"""
+        # Apply low-pass filter for smooth steering
+        filtered_steering = (self.steering_filter_alpha * self.last_steering_angle + 
+                           (1 - self.steering_filter_alpha) * steering_angle)
+        self.last_steering_angle = filtered_steering
+        
+        # Create Twist message
+        twist = Twist()
+        
+        # Set linear velocity (constant forward speed)
+        twist.linear.x = self.max_linear_velocity
+        
+        # Set angular velocity based on steering angle
+        twist.angular.z = -filtered_steering * self.max_angular_velocity * self.steering_sensitivity
+        
+        # Publish command
+        self.cmd_vel_pub.publish(twist)
+        
+        # Log steering information
+        rospy.loginfo(f"Steering: {filtered_steering:.3f}, Angular: {twist.angular.z:.3f}")
+    
+    def process_frame(self, frame):
+        """Process a single frame for lane detection"""
+        if frame is None:
+            return None
+        
+        height, width = frame.shape[:2]
         
         # Preprocess frame
-        edges = preprocess_frame(frame)
+        edges = self.preprocess_frame(frame)
         
         # Apply region of interest
-        roi_edges = region_of_interest(edges, height, width)
+        roi_edges = self.region_of_interest(edges, height, width)
         
         # Detect lane lines
-        lines = detect_lane_lines(roi_edges)
+        lines = self.detect_lane_lines(roi_edges)
         
         # Separate lines
-        left_lines, right_lines = separate_lines(lines, width)
+        left_lines, right_lines = self.separate_lines(lines, width)
         
         # Fit polynomials
-        left_coeffs = fit_polynomial(left_lines, height)
-        right_coeffs = fit_polynomial(right_lines, height)
+        left_coeffs = self.fit_polynomial(left_lines, height)
+        right_coeffs = self.fit_polynomial(right_lines, height)
         
         # Calculate steering angle
-        steering_angle = calculate_steering_angle(left_coeffs, right_coeffs, height, width)
+        steering_angle = self.calculate_steering_angle(left_coeffs, right_coeffs, height, width)
         
-        # Draw results
-        result_frame = draw_lanes(frame, left_coeffs, right_coeffs, height)
-        result_frame = draw_steering_info(result_frame, steering_angle)
+        # Draw results on frame
+        result_frame = self.draw_lanes(frame, left_coeffs, right_coeffs, height)
+        result_frame = self.draw_steering_info(result_frame, steering_angle)
         
-        # Write to output video
-        if output_path:
-            out.write(result_frame)
+        # Publish processed image
+        self.publish_processed_image(result_frame)
         
-        # Display frame
-        cv2.imshow('Lane Detection', result_frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        # Publish debug image
+        self.publish_debug_image(frame, edges, roi_edges, left_lines, right_lines, steering_angle)
+        
+        # Publish steering command
+        self.publish_cmd_vel(steering_angle)
+        
+        return steering_angle
     
-    print(f"\nProcessing completed. Processed {frame_count} frames.")
-    
-    # Cleanup
-    cap.release()
-    if output_path:
-        out.release()
-    cv2.destroyAllWindows()
+    def run(self):
+        """Main processing loop"""
+        rate = rospy.Rate(10)  # 10 Hz processing rate
+        
+        rospy.loginfo("Starting lane detection processing...")
+        
+        while not rospy.is_shutdown():
+            with self.frame_lock:
+                if self.latest_frame is not None and not self.processing:
+                    self.processing = True
+                    frame = self.latest_frame.copy()
+                    self.processing = False
+                else:
+                    frame = None
+            
+            if frame is not None:
+                try:
+                    steering_angle = self.process_frame(frame)
+                    
+                except Exception as e:
+                    rospy.logerr(f"Error processing frame: {e}")
+            
+            rate.sleep()
 
 def main():
-    """Main function"""
-    video_path = "road.mp4"
-    
-    # Check if video exists
-    if not os.path.exists(video_path):
-        print(f"Error: Video file {video_path} not found!")
-        return
-    
-    # Process video
-    output_path = "2simple_lane_detection_output.mp4"
-    process_video(video_path, output_path)
-    
-    print(f"Lane detection completed! Output saved to: {output_path}")
+    try:
+        node = LaneDetectionNode()
+        node.run()
+    except rospy.ROSInterruptException:
+        rospy.loginfo("Lane Detection Node interrupted")
+    except Exception as e:
+        rospy.logerr(f"Lane Detection Node error: {e}")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main() 
