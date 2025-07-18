@@ -20,12 +20,16 @@ class LaneDetectionNode:
         # Parameters
         self.camera_topic = rospy.get_param('~camera_topic', '/usb_cam/image_raw')
         self.cmd_vel_topic = rospy.get_param('~cmd_vel_topic', '/cmd_vel')
+        self.processed_image_topic = rospy.get_param('~processed_image_topic', '/lane_detection/processed_image')
+        self.debug_image_topic = rospy.get_param('~debug_image_topic', '/lane_detection/debug_image')
         self.max_linear_velocity = rospy.get_param('~max_linear_velocity', 0.5)
         self.max_angular_velocity = rospy.get_param('~max_angular_velocity', 1.0)
         self.steering_sensitivity = rospy.get_param('~steering_sensitivity', 1.0)
         
         # Publishers and Subscribers
         self.cmd_vel_pub = rospy.Publisher(self.cmd_vel_topic, Twist, queue_size=1)
+        self.processed_image_pub = rospy.Publisher(self.processed_image_topic, Image, queue_size=1)
+        self.debug_image_pub = rospy.Publisher(self.debug_image_topic, Image, queue_size=1)
         self.image_sub = rospy.Subscriber(self.camera_topic, Image, self.image_callback)
         
         # Alternative compressed image subscriber (uncomment if needed)
@@ -45,6 +49,8 @@ class LaneDetectionNode:
         rospy.loginfo(f"Lane Detection Node initialized")
         rospy.loginfo(f"Subscribing to: {self.camera_topic}")
         rospy.loginfo(f"Publishing to: {self.cmd_vel_topic}")
+        rospy.loginfo(f"Publishing processed images to: {self.processed_image_topic}")
+        rospy.loginfo(f"Publishing debug images to: {self.debug_image_topic}")
         
     def image_callback(self, msg):
         """Callback for Image messages"""
@@ -195,6 +201,114 @@ class LaneDetectionNode:
         
         return steering_angle
     
+    def draw_lanes(self, frame, left_coeffs, right_coeffs, height):
+        """Draw detected lanes on frame"""
+        result = frame.copy()
+        
+        # Generate points for polynomial curves
+        y_points = np.linspace(height//2, height, 50)
+        
+        # Draw left lane
+        if left_coeffs is not None:
+            left_x_points = left_coeffs[0] * y_points + left_coeffs[1]
+            left_points = np.array([np.column_stack((left_x_points, y_points))], dtype=np.int32)
+            cv2.polylines(result, left_points, False, (0, 255, 0), 3)
+        
+        # Draw right lane
+        if right_coeffs is not None:
+            right_x_points = right_coeffs[0] * y_points + right_coeffs[1]
+            right_points = np.array([np.column_stack((right_x_points, y_points))], dtype=np.int32)
+            cv2.polylines(result, right_points, False, (0, 255, 0), 3)
+        
+        return result
+    
+    def draw_steering_info(self, frame, steering_angle):
+        """Draw steering information on frame"""
+        height, width = frame.shape[:2]
+        
+        # Draw steering wheel
+        center_x = width // 2
+        center_y = height - 50
+        
+        cv2.circle(frame, (center_x, center_y), 30, (255, 255, 255), 2)
+        
+        # Draw steering direction
+        angle_rad = steering_angle * math.pi / 4  # Scale angle for visualization
+        end_x = center_x + int(25 * math.sin(angle_rad))
+        end_y = center_y - int(25 * math.cos(angle_rad))
+        cv2.line(frame, (center_x, center_y), (end_x, end_y), (0, 0, 255), 3)
+        
+        # Add text
+        cv2.putText(frame, f"Steering: {steering_angle:.2f}", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Add driving decision
+        if abs(steering_angle) < 0.1:
+            decision = "GO STRAIGHT"
+            color = (0, 255, 0)
+        elif steering_angle > 0:
+            decision = "TURN RIGHT"
+            color = (0, 0, 255)
+        else:
+            decision = "TURN LEFT"
+            color = (255, 0, 0)
+        
+        cv2.putText(frame, decision, (10, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        
+        return frame
+    
+    def publish_processed_image(self, processed_frame):
+        """Publish processed image as ROS Image message"""
+        try:
+            # Convert OpenCV image to ROS Image message
+            ros_image = self.bridge.cv2_to_imgmsg(processed_frame, "bgr8")
+            
+            # Publish the processed image
+            self.processed_image_pub.publish(ros_image)
+            
+        except Exception as e:
+            rospy.logerr(f"Error publishing processed image: {e}")
+    
+    def publish_debug_image(self, frame, edges, roi_edges, left_lines, right_lines, steering_angle):
+        """Publish debug image with multiple visualization layers"""
+        try:
+            # Create debug image with multiple panels
+            height, width = frame.shape[:2]
+            debug_image = np.zeros((height * 2, width * 2, 3), dtype=np.uint8)
+            
+            # Panel 1: Original frame
+            debug_image[0:height, 0:width] = frame
+            
+            # Panel 2: Edge detection
+            edges_color = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+            debug_image[0:height, width:width*2] = edges_color
+            
+            # Panel 3: ROI edges
+            roi_edges_color = cv2.cvtColor(roi_edges, cv2.COLOR_GRAY2BGR)
+            debug_image[height:height*2, 0:width] = roi_edges_color
+            
+            # Panel 4: Final result with lane detection
+            result_frame = self.draw_lanes(frame, 
+                                         self.fit_polynomial(left_lines, height) if left_lines else None,
+                                         self.fit_polynomial(right_lines, height) if right_lines else None, 
+                                         height)
+            result_frame = self.draw_steering_info(result_frame, steering_angle)
+            debug_image[height:height*2, width:width*2] = result_frame
+            
+            # Add panel labels
+            cv2.putText(debug_image, "Original", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(debug_image, "Edge Detection", (width + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(debug_image, "ROI Edges", (10, height + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(debug_image, "Lane Detection", (width + 10, height + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            # Convert to ROS Image and publish
+            ros_image = self.bridge.cv2_to_imgmsg(debug_image, "bgr8")
+            self.debug_image_pub.publish(ros_image)
+            
+        except Exception as e:
+            rospy.logerr(f"Error publishing debug image: {e}")
+    
     def publish_cmd_vel(self, steering_angle):
         """Publish steering command as Twist message"""
         # Apply low-pass filter for smooth steering
@@ -243,6 +357,16 @@ class LaneDetectionNode:
         # Calculate steering angle
         steering_angle = self.calculate_steering_angle(left_coeffs, right_coeffs, height, width)
         
+        # Draw results on frame
+        result_frame = self.draw_lanes(frame, left_coeffs, right_coeffs, height)
+        result_frame = self.draw_steering_info(result_frame, steering_angle)
+        
+        # Publish processed image
+        self.publish_processed_image(result_frame)
+        
+        # Publish debug image
+        self.publish_debug_image(frame, edges, roi_edges, left_lines, right_lines, steering_angle)
+        
         # Publish steering command
         self.publish_cmd_vel(steering_angle)
         
@@ -266,9 +390,6 @@ class LaneDetectionNode:
             if frame is not None:
                 try:
                     steering_angle = self.process_frame(frame)
-                    
-                    # Optional: Publish debug image
-                    # self.publish_debug_image(frame, steering_angle)
                     
                 except Exception as e:
                     rospy.logerr(f"Error processing frame: {e}")
